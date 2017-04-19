@@ -60,8 +60,11 @@ def apply_loss(labels, net_out, loss_fn, weight_decay, is_training,
     loss = loss_fn(labels=labels,
                    logits=tf.reshape(net_out, [-1, cfg.nclasses]))
 
-    if is_training:
-        loss = apply_l2_penalty(loss, weight_decay)
+    # Add L2 penalty only if we are training
+    if weight_decay > 0:
+        loss = tf.cond(is_training,
+                       lambda: apply_l2_penalty(loss, weight_decay),
+                       lambda: tf.identity(loss))
 
     # Return the mean loss (over pixels *and* batches)
     if return_mean_loss:

@@ -212,10 +212,8 @@ def __run(build_model):
     print("Building the model ...")
     cfg.global_step = tf.Variable(0, trainable=False, name='global_step',
                                   dtype=cfg._FLOATX)
-    sym_inputs = tf.placeholder(shape=cfg.input_shape,
+    sym_inputs = tf.placeholder(shape=cfg.val_input_shape,
                                 dtype=cfg._FLOATX, name='inputs')
-    sym_val_inputs = tf.placeholder(shape=cfg.val_input_shape,
-                                    dtype=cfg._FLOATX, name='val_inputs')
     sym_labels = tf.placeholder(shape=[None], dtype='int32', name='labels')
 
     # TODO is there another way to split the input in chunks when
@@ -227,27 +225,20 @@ def __run(build_model):
     sym_labels_split_dim = tf.placeholder(shape=[cfg.num_gpus],
                                           dtype='int32',
                                           name='label_split_dim')
+    is_training = tf.placeholder(tf.bool, shape=())
     placeholders = [sym_inputs, sym_labels, sym_inputs_split_dim,
-                    sym_labels_split_dim]
-    val_placeholders = [sym_val_inputs, sym_labels, sym_inputs_split_dim,
-                        sym_labels_split_dim]
+                    sym_labels_split_dim, is_training]
 
     with sess, tf.device(cfg.devices[0]):
         # Model compilation
         # -----------------
-        train_outs, train_summary_op = build_graph(placeholders,
-                                                   cfg.input_shape,
-                                                   cfg.optimizer,
-                                                   cfg.weight_decay,
-                                                   cfg.loss_fn, build_model,
-                                                   True)
-
-        val_outs, val_summary_ops = build_graph(val_placeholders,
-                                                cfg.val_input_shape,
-                                                cfg.optimizer,
-                                                cfg.weight_decay,
-                                                cfg.loss_fn, build_model,
-                                                False)
+        (train_outs, train_summary_op, val_outs,
+         val_summary_ops) = build_graph(placeholders,
+                                        cfg.input_shape,
+                                        cfg.optimizer,
+                                        cfg.weight_decay,
+                                        cfg.loss_fn,
+                                        build_model)
 
         # Add the variables initializer Op.
         init = tf.group(tf.global_variables_initializer(),
@@ -281,7 +272,6 @@ def __run(build_model):
         if not cfg.do_validation_only:
             # Start training loop
             main_loop_kwags = {'placeholders': placeholders,
-                               'val_placeholders': val_placeholders,
                                'train_outs': train_outs,
                                'train_summary_op': train_summary_op,
                                'val_outs': val_outs,
@@ -299,7 +289,7 @@ def __run(build_model):
                 print('Starting validation on %s set' % s)
                 from validate import validate
                 mean_iou[s] = validate(
-                    val_placeholders,
+                    placeholders,
                     val_outs,
                     val_summary_ops[s],
                     sess,
@@ -312,14 +302,14 @@ def __run(build_model):
 
 
 def build_graph(placeholders, input_shape, optimizer, weight_decay, loss_fn,
-                build_model, is_training):
+                build_model):
     cfg = gflags.cfg
     num_gpus = cfg.num_gpus
     devices = cfg.devices
     nclasses = cfg.nclasses
     global_step = cfg.global_step
-    [sym_inputs, sym_labels, sym_input_split_dim,
-     sym_labels_split_dim] = placeholders
+    [sym_inputs, sym_labels, sym_input_split_dim, sym_labels_split_dim,
+     is_training] = placeholders
 
     sym_inputs_per_gpu = tf.split(sym_inputs, sym_input_split_dim, 0)
     sym_labels_per_gpu = tf.split(sym_labels, sym_labels_split_dim, 0)
@@ -334,7 +324,7 @@ def build_graph(placeholders, input_shape, optimizer, weight_decay, loss_fn,
     for device_idx, (inputs, labels) in enumerate(zip(sym_inputs_per_gpu,
                                                       sym_labels_per_gpu)):
         with tf.device(devices[device_idx]):
-            reuse_variables = not is_training or device_idx > 0
+            reuse_variables = device_idx > 0
             with tf.variable_scope(cfg.model_name,
                                    reuse=reuse_variables) as scope:
                 with tf.name_scope('tower_%d' % device_idx) as scope:
@@ -362,9 +352,8 @@ def build_graph(placeholders, input_shape, optimizer, weight_decay, loss_fn,
                     sym_pred = tf.argmax(softmax_pred, axis=-1)
 
                     # Compute gradients
-                    if is_training:
-                        grads = optimizer.compute_gradients(loss)
-                        tower_grads.append(grads)
+                    grads = optimizer.compute_gradients(loss)
+                    tower_grads.append(grads)
                     tower_losses.append(loss)
                     tower_preds.append(sym_pred)
 
@@ -387,72 +376,68 @@ def build_graph(placeholders, input_shape, optimizer, weight_decay, loss_fn,
     # Compute the average *per variable* across the towers
     sym_avg_tower_loss = tf.reduce_mean(tower_losses)
 
-    if is_training:
-        # Impose graph dependency so that update operations are computed
-        # even if they're are not explicit in the outputs os session.run
-        grads_and_vars = average_gradients(tower_grads)
-        update_ops = tf.get_collection(tf.GraphKeys.UPDATE_OPS)
-        with tf.control_dependencies(update_ops):
-            train_op = optimizer.apply_gradients(grads_and_vars=grads_and_vars,
-                                                 global_step=global_step)
+    # Impose graph dependency so that update operations are computed
+    # even if they're are not explicit in the outputs os session.run
+    grads_and_vars = average_gradients(tower_grads)
+    update_ops = tf.get_collection(tf.GraphKeys.UPDATE_OPS)
+    with tf.control_dependencies(update_ops):
+        train_op = optimizer.apply_gradients(grads_and_vars=grads_and_vars,
+                                             global_step=global_step)
 
     #############
     # SUMMARIES #
     #############
-    if is_training:
-        train_summaries = tf.get_collection_ref(key='train_summaries')
+    train_summaries = tf.get_collection_ref(key='train_summaries')
 
-        # Add the histograms of the gradients
-        for grad, var in grads_and_vars:
-            if grad is not None:
-                train_summaries.append(
-                    tf.summary.histogram(var.op.name + '/gradients', grad))
+    # Add the histograms of the gradients
+    for grad, var in grads_and_vars:
+        if grad is not None:
+            train_summaries.append(
+                tf.summary.histogram(var.op.name + '/gradients', grad))
 
-        # Add the histograms for trainable variables
-        for var in tf.trainable_variables():
-            train_summaries.append(tf.summary.histogram(var.op.name, var))
+    # Add the histograms for trainable variables
+    for var in tf.trainable_variables():
+        train_summaries.append(tf.summary.histogram(var.op.name, var))
+
+    # Add loss summaries
+    for device_idx, loss in enumerate(tower_losses):
+        # Save this GPU's summary (thanks to scope)
+        with tf.name_scope('tower_%d' % device_idx) as scope:
+            train_summaries.append(
+                tf.summary.scalar('Loss_tower_{}'.format(scope), loss))
+    train_summaries.append(tf.summary.scalar('Mean_tower_loss',
+                                             sym_avg_tower_loss))
+    # Add metrics
+    train_summaries.append(tf.summary.scalar('Mean_IoU', sym_m_iou))
+    train_summary_op = tf.summary.merge(train_summaries)
+
+    # Add validation summaries
+    val_summary_ops = {}
+    for s in cfg.val_on_sets:
+        val_summaries = tf.get_collection_ref(key='val_' + s +
+                                                  '_summaries')
 
         # Add loss summaries
         for device_idx, loss in enumerate(tower_losses):
             # Save this GPU's summary (thanks to scope)
             with tf.name_scope('tower_%d' % device_idx) as scope:
-                train_summaries.append(
-                    tf.summary.scalar('Loss_tower_{}'.format(scope), loss))
-        train_summaries.append(tf.summary.scalar('Mean_tower_loss',
-                                                 sym_avg_tower_loss))
+                val_summaries.append(
+                    tf.summary.scalar('Loss_tower_{}_{}'.format(scope, s),
+                                      loss))
+        val_summaries.append(tf.summary.scalar('Mean_tower_loss_' + s,
+                                               sym_avg_tower_loss))
         # Add metrics
-        train_summaries.append(tf.summary.scalar('Mean_IoU', sym_m_iou))
-        train_summary_op = tf.summary.merge(train_summaries)
-    else:
-        # Add validation summaries
-        val_summary_ops = {}
-        for s in cfg.val_on_sets:
-            val_summaries = tf.get_collection_ref(key='val_' + s +
-                                                      '_summaries')
+        val_summaries.append(tf.summary.scalar('Mean_IoU_' + s, sym_m_iou))
+        val_summary_ops[s] = tf.summary.merge(val_summaries)
 
-            # Add loss summaries
-            for device_idx, loss in enumerate(tower_losses):
-                # Save this GPU's summary (thanks to scope)
-                with tf.name_scope('tower_%d' % device_idx) as scope:
-                    val_summaries.append(
-                        tf.summary.scalar('Loss_tower_{}_{}'.format(scope, s),
-                                          loss))
-            val_summaries.append(tf.summary.scalar('Mean_tower_loss_' + s,
-                                                   sym_avg_tower_loss))
-            # Add metrics
-            val_summaries.append(tf.summary.scalar('Mean_IoU_' + s, sym_m_iou))
-            val_summary_ops[s] = tf.summary.merge(val_summaries)
-
-    if is_training:
-        return [sym_avg_tower_loss, train_op], train_summary_op
-    else:
-        return ([sym_preds, sym_m_iou, sym_avg_tower_loss, sym_cm_update_op],
-                val_summary_ops)
+    return ([sym_avg_tower_loss, train_op], train_summary_op,
+            [sym_preds, sym_m_iou, sym_avg_tower_loss, sym_cm_update_op],
+            val_summary_ops)
 
 
-def main_loop(placeholders, val_placeholders, train_outs, train_summary_op,
-              val_outs, val_summary_ops, loss_fn, Dataset, dataset_params,
-              valid_params, sess):
+def main_loop(placeholders, train_outs, train_summary_op, val_outs,
+              val_summary_ops, loss_fn, Dataset, dataset_params, valid_params,
+              sess):
 
     cfg = gflags.cfg
     max_epochs = cfg.max_epochs
@@ -513,7 +498,7 @@ def main_loop(placeholders, val_placeholders, train_outs, train_summary_op,
             # Create dictionary to feed the input placeholders
             # placeholders = [sym_inputs, sym_labels, sym_which_set,
             #                 sym_input_split_dim, sym_labels_split_dim]
-            in_values = [x_in, y_in, split_dim, labels_split_dim]
+            in_values = [x_in, y_in, split_dim, labels_split_dim, True]
             feed_dict = {p: v for (p, v) in zip(placeholders, in_values)}
 
             # train_op does not return anything, but must be in the
@@ -565,7 +550,7 @@ def main_loop(placeholders, val_placeholders, train_outs, train_summary_op,
                 for s in cfg.val_on_sets:
                     print('\nStarting validation on %s set' % s)
                     mean_iou[s] = validate(
-                        val_placeholders,
+                        placeholders,
                         val_outs,
                         val_summary_ops[s],
                         sess,

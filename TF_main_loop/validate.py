@@ -278,7 +278,7 @@ def validate(placeholders,
 
                 # Create dictionary to feed the input placeholders:
                 # and get batch pred, mIoU so far, batch loss
-                in_values = [x_in, y_in, split_dim, lab_split_dim]
+                in_values = [x_in, y_in, split_dim, lab_split_dim, False]
                 feed_dict = {p: v for (p, v) in zip(placeholders, in_values)}
                 y_pred_batch, mIoU, loss, _ = sess.run(eval_outs,
                                                        feed_dict=feed_dict)
