@@ -109,8 +109,6 @@ def __parse_config(argv=None):
             cfg.val_input_shape = (None, cfg.seq_length) + Dataset.data_shape
         else:
             cfg.val_input_shape = [None, cfg.seq_length, None, None, 3]
-        if cfg.crop_size:
-            cfg.input_shape[2:4] = cfg.crop_size
         ret_ext_seq = cfg.return_extended_sequences
         ret_middle_frame = cfg.return_middle_frame_only
         dataset_params['return_extended_sequences'] = ret_ext_seq
@@ -121,8 +119,6 @@ def __parse_config(argv=None):
             cfg.val_input_shape = (None,) + Dataset.data_shape
         else:
             cfg.val_input_shape = [None, None, None, 3]
-        if cfg.crop_size:
-            cfg.input_shape[1:3] = cfg.crop_size
     dataset_params['use_threads'] = cfg.use_threads
     dataset_params['nthreads'] = cfg.nthreads
     dataset_params['remove_per_img_mean'] = cfg.remove_per_img_mean
@@ -212,10 +208,9 @@ def __run(build_model):
     print("Building the model ...")
     cfg.global_step = tf.Variable(0, trainable=False, name='global_step',
                                   dtype=cfg._FLOATX)
-    sym_inputs = tf.placeholder(shape=cfg.input_shape,
-                                dtype=cfg._FLOATX, name='inputs')
-    sym_val_inputs = tf.placeholder(shape=cfg.val_input_shape,
-                                    dtype=cfg._FLOATX, name='val_inputs')
+    # Use input_shape to rely on the one that is least restrictive
+    sym_inputs = tf.placeholder(shape=cfg.input_shape, dtype=cfg._FLOATX,
+                                name='inputs')
     sym_labels = tf.placeholder(shape=[None], dtype='int32', name='labels')
 
     # TODO is there another way to split the input in chunks when
@@ -229,21 +224,17 @@ def __run(build_model):
                                           name='label_split_dim')
     placeholders = [sym_inputs, sym_labels, sym_inputs_split_dim,
                     sym_labels_split_dim]
-    val_placeholders = [sym_val_inputs, sym_labels, sym_inputs_split_dim,
-                        sym_labels_split_dim]
 
     with sess, tf.device(cfg.devices[0]):
         # Model compilation
         # -----------------
         train_outs, train_summary_op = build_graph(placeholders,
-                                                   cfg.input_shape,
                                                    cfg.optimizer,
                                                    cfg.weight_decay,
                                                    cfg.loss_fn, build_model,
                                                    True)
 
-        val_outs, val_summary_ops = build_graph(val_placeholders,
-                                                cfg.val_input_shape,
+        val_outs, val_summary_ops = build_graph(placeholders,
                                                 cfg.optimizer,
                                                 cfg.weight_decay,
                                                 cfg.loss_fn, build_model,
@@ -281,7 +272,6 @@ def __run(build_model):
         if not cfg.do_validation_only:
             # Start training loop
             main_loop_kwags = {'placeholders': placeholders,
-                               'val_placeholders': val_placeholders,
                                'train_outs': train_outs,
                                'train_summary_op': train_summary_op,
                                'val_outs': val_outs,
@@ -299,7 +289,7 @@ def __run(build_model):
                 print('Starting validation on %s set' % s)
                 from validate import validate
                 mean_iou[s] = validate(
-                    val_placeholders,
+                    placeholders,
                     val_outs,
                     val_summary_ops[s],
                     sess,
@@ -311,10 +301,9 @@ def __run(build_model):
                     save_raw_predictions=False)
 
 
-def build_graph(placeholders, input_shape, optimizer, weight_decay, loss_fn,
-                build_model, is_training):
+def build_graph(placeholders, optimizer, weight_decay, loss_fn, build_model,
+                is_training):
     cfg = gflags.cfg
-    num_gpus = cfg.num_gpus
     devices = cfg.devices
     nclasses = cfg.nclasses
     global_step = cfg.global_step
@@ -323,9 +312,8 @@ def build_graph(placeholders, input_shape, optimizer, weight_decay, loss_fn,
 
     sym_inputs_per_gpu = tf.split(sym_inputs, sym_input_split_dim, 0)
     sym_labels_per_gpu = tf.split(sym_labels, sym_labels_split_dim, 0)
-
-    for dev_idx in range(num_gpus):
-        sym_inputs_per_gpu[dev_idx].set_shape(input_shape)
+    for el in sym_inputs_per_gpu:
+        tf.Tensor.set_shape(el, [None] + sym_inputs.shape.as_list()[1:])
 
     # Compute the gradients for each model tower
     tower_grads = []
@@ -446,9 +434,9 @@ def build_graph(placeholders, input_shape, optimizer, weight_decay, loss_fn,
                 val_summary_ops)
 
 
-def main_loop(placeholders, val_placeholders, train_outs, train_summary_op,
-              val_outs, val_summary_ops, loss_fn, Dataset, dataset_params,
-              valid_params, sess):
+def main_loop(placeholders, train_outs, train_summary_op, val_outs,
+              val_summary_ops, loss_fn, Dataset, dataset_params, valid_params,
+              sess):
 
     cfg = gflags.cfg
     max_epochs = cfg.max_epochs
@@ -511,6 +499,7 @@ def main_loop(placeholders, val_placeholders, train_outs, train_summary_op,
             #                 sym_input_split_dim, sym_labels_split_dim]
             in_values = [x_in, y_in, split_dim, labels_split_dim]
             feed_dict = {p: v for (p, v) in zip(placeholders, in_values)}
+            tf.Tensor.set_shape(placeholders[0], x_in.shape)
 
             # train_op does not return anything, but must be in the
             # outputs to update the gradient
@@ -561,7 +550,7 @@ def main_loop(placeholders, val_placeholders, train_outs, train_summary_op,
                 for s in cfg.val_on_sets:
                     print('\nStarting validation on %s set' % s)
                     mean_iou[s] = validate(
-                        val_placeholders,
+                        placeholders,
                         val_outs,
                         val_summary_ops[s],
                         sess,
