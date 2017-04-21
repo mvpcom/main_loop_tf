@@ -499,7 +499,6 @@ def main_loop(placeholders, train_outs, train_summary_op, val_outs,
             #                 sym_input_split_dim, sym_labels_split_dim]
             in_values = [x_in, y_in, split_dim, labels_split_dim]
             feed_dict = {p: v for (p, v) in zip(placeholders, in_values)}
-            tf.Tensor.set_shape(placeholders[0], x_in.shape)
 
             # train_op does not return anything, but must be in the
             # outputs to update the gradient

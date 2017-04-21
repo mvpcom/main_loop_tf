@@ -280,7 +280,6 @@ def validate(placeholders,
                 # and get batch pred, mIoU so far, batch loss
                 in_values = [x_in, y_in, split_dim, lab_split_dim]
                 feed_dict = {p: v for (p, v) in zip(placeholders, in_values)}
-                tf.Tensor.set_shape(placeholders[0], x_in.shape)
                 y_pred_batch, mIoU, loss, _ = sess.run(eval_outs,
                                                        feed_dict=feed_dict)
                 summary_str = sess.run(val_summary_op, feed_dict=feed_dict)
