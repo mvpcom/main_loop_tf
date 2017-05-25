@@ -53,21 +53,28 @@ def apply_loss(labels, net_out, loss_fn, weight_decay, is_training,
     '''
 
     cfg = gflags.cfg
-
-    if mask_voids and len(cfg.void_labels):
-        # TODO Check this
-        print('Masking the void labels')
-        mask = tf.not_equal(labels, cfg.void_labels)
-        labels *= tf.cast(mask, 'int32')  # void_class --> 0 (random class)
-        # Train loss
-        loss = loss_fn(labels=labels,
-                       logits=tf.reshape(net_out, [-1, cfg.nclasses]))
-        mask = tf.cast(mask, 'float32')
-        loss *= mask
+    if cfg.task in (cfg.task_names['seg'], cfg.task_names['class']):
+        if mask_voids and len(cfg.void_labels):
+            # TODO Check this
+            print('Masking the void labels')
+            mask = tf.not_equal(labels, cfg.void_labels)
+            labels *= tf.cast(mask, 'int32')  # void_class --> 0 (random class)
+            # Train loss
+            loss = loss_fn(labels=labels,
+                           logits=tf.reshape(net_out, [-1, cfg.nclasses]))
+            mask = tf.cast(mask, 'float32')
+            loss *= mask
+        else:
+            # Train loss
+            loss = loss_fn(labels=labels,
+                           logits=tf.reshape(net_out, [-1, cfg.nclasses]))
     else:
-        # Train loss
-        loss = loss_fn(labels=labels,
-                       logits=tf.reshape(net_out, [-1, cfg.nclasses]))
+        if loss_fn is tf.losses.mean_squared_error:
+            loss = loss_fn(labels=labels,
+                           predictions=tf.reshape(net_out, [-1]))
+        else:
+            loss = loss_fn(multi_class_labels=labels,
+                           logits=tf.reshape(net_out, [-1]))
 
     if is_training:
         loss = apply_l2_penalty(loss, weight_decay)

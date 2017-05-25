@@ -18,7 +18,7 @@ from utils import compute_chunk_size, fig2array
 def validate(placeholders,
              eval_outs,
              val_summary_op,
-             val_reset_cm_op,
+             val_reset_cm_op=None,
              which_set='valid',
              epoch_id=None,
              nthreads=2):
@@ -61,10 +61,12 @@ def validate(placeholders,
                            epoch_id_str + '{percentage:3.0f}%|{bar}| '
                            '[{elapsed}<{remaining},'
                            '{rate_fmt} {postfix}]')
-    prev_subset = None
-    per_subset_IoUs = {}
-    # Reset Confusion Matrix at the beginning of validation
-    cfg.sess.run(val_reset_cm_op)
+
+    if cfg.task == cfg.task_names['seg'] and val_reset_cm_op is not None:
+        prev_subset = None
+        per_subset_IoUs = {}
+        # Reset Confusion Matrix at the beginning of validation
+        cfg.sess.run(val_reset_cm_op)
 
     for bidx in range(this_set.nbatches):
         if cfg.sv.should_stop():  # Stop requested
@@ -78,8 +80,8 @@ def validate(placeholders,
         raw_data_batch = ret['raw_data']
 
         # Reset the confusion matrix if we are switching video
-        if this_set.set_has_GT and (not prev_subset or
-                                    subset != prev_subset):
+        if cfg.task != cfg.task_names['reg'] and this_set.set_has_GT and (
+         not prev_subset or subset != prev_subset):
             tf.logging.info('Reset confusion matrix! {} --> {}'.format(
                 prev_subset, subset))
             cfg.sess.run(val_reset_cm_op)
@@ -110,46 +112,79 @@ def validate(placeholders,
         feed_dict = {p: v for (p, v) in zip(placeholders, in_values)}
 
         if this_set.set_has_GT:
-            # Class balance
-            # class_balance_w = np.ones(np.prod(
-            #     mini_x.shape[:3])).astype(floatX)
-            # class_balance = loss_kwargs.get('class_balance', '')
-            # if class_balance in ['median_freq_cost', 'rare_freq_cost']:
-            #     w_freq = loss_kwargs.get('w_freq')
-            #     class_balance_w = w_freq[y_true.flatten()].astype(floatX)
+            if cfg.task == cfg.task_names['seg']:
+                # Class balance
+                # class_balance_w = np.ones(np.prod(
+                #     mini_x.shape[:3])).astype(floatX)
+                # class_balance = loss_kwargs.get('class_balance', '')
+                # if class_balance in ['median_freq_cost', 'rare_freq_cost']:
+                #     w_freq = loss_kwargs.get('w_freq')
+                #     class_balance_w = w_freq[y_true.flatten()].astype(floatX)
 
-            # Get the batch pred, the mIoU so far (computed incrementally over
-            # the sequences processed so far), the batch loss and potentially
-            # the summary
-            if cidx % cfg.val_summary_freq == 0:
-                (y_pred_batch, y_soft_batch, mIoU, per_class_IoU, loss,
-                 _, summary_str) = cfg.sess.run(eval_outs + [val_summary_op],
-                                                feed_dict=feed_dict)
-                cfg.sv.summary_computed(cfg.sess, summary_str,
-                                        global_step=cidx)
+                # Get the batch pred, the mIoU so far (computed
+                # incrementally over the sequences processed so far),
+                # the batch loss and potentially the summary
+                if cidx % cfg.val_summary_freq == 0:
+                    (y_pred_batch, y_soft_batch, mIoU, per_class_IoU, loss,
+                     _, summary_str) = cfg.sess.run(
+                         eval_outs + [val_summary_op], feed_dict=feed_dict)
+                    cfg.sv.summary_computed(cfg.sess, summary_str,
+                                            global_step=cidx)
+                else:
+                    (y_pred_batch, y_soft_batch, mIoU, per_class_IoU, loss,
+                     _) = cfg.sess.run(eval_outs, feed_dict=feed_dict)
+                tot_loss += loss
+
+                # If fg/bg, just consider the foreground class
+                if len(per_class_IoU) == 2:
+                    per_class_IoU = per_class_IoU[1]
+
+                # Save the IoUs per subset (i.e., video) and their average
+                if cfg.summary_per_subset:
+                    per_subset_IoUs[subset] = per_class_IoU
+                    mIoU = np.mean(per_subset_IoUs.values())
+
+                pbar.set_postfix({
+                    'val loss': '{:.3f}({:.3f})'.format(
+                        loss, tot_loss/(bidx+1)),
+                    'mIoU': '{:.3f}'.format(mIoU)})
+            elif cfg.task == cfg.task_names['reg']:
+                if cidx % cfg.val_summary_freq == 0:
+                    (y_pred_batch, loss, _, summary_str) = cfg.sess.run(
+                     eval_outs + [val_summary_op], feed_dict=feed_dict)
+
+                    cfg.sv.summary_computed(cfg.sess, summary_str,
+                                            global_step=cidx)
+                else:
+                    (y_pred_batch, loss, _) = cfg.sess.run(
+                        eval_outs, feed_dict=feed_dict)
+                tot_loss += loss
+
+                pbar.set_postfix({
+                    'val loss': '{:.3f}({:.3f})'.format(
+                        loss, tot_loss/(bidx+1))})
+
+            elif cfg.task == cfg.task_names['class']:
+                pass
             else:
-                (y_pred_batch, y_soft_batch, mIoU, per_class_IoU, loss,
-                 _) = cfg.sess.run(eval_outs, feed_dict=feed_dict)
-            tot_loss += loss
-
-            # If fg/bg, just consider the foreground class
-            if len(per_class_IoU) == 2:
-                per_class_IoU = per_class_IoU[1]
-
-            # Save the IoUs per subset (i.e., video) and their average
-            if cfg.summary_per_subset:
-                per_subset_IoUs[subset] = per_class_IoU
-                mIoU = np.mean(per_subset_IoUs.values())
-
-            pbar.set_postfix({
-                'val loss': '{:.3f}({:.3f})'.format(loss, tot_loss/(bidx+1)),
-                'mIoU': '{:.3f}'.format(mIoU)})
+                raise NotImplementedError()
         else:
-            y_pred_batch, y_soft_batch, summary_str = cfg.sess.run(
-                eval_outs[:2] + [val_summary_op], feed_dict=feed_dict)
-            mIoU = 0
+            if cfg.task == cfg.task_names['seg']:
+                y_pred_batch, y_soft_batch, summary_str = cfg.sess.run(
+                    eval_outs[:2] + [val_summary_op], feed_dict=feed_dict)
+                mIoU = 0
+            elif cfg.task == cfg.task_names['reg']:
+                y_pred_batch, summary_str = cfg.sess.run(
+                    eval_outs[:2] + [val_summary_op], feed_dict=feed_dict)
+            elif cfg.task == cfg.task_names['class']:
+                pass
+            else:
+                raise NotImplementedError()
+
             summary_str = cfg.sess.run(val_summary_op, feed_dict=feed_dict)
-            cfg.sv.summary_computed(cfg.sess, summary_str, global_step=cidx)
+            cfg.sv.summary_computed(cfg.sess, summary_str,
+                                    global_step=cidx)
+
         pbar.update(1)
         # TODO there is no guarantee that this will be processed
         # in order. We could use condition variables, e.g.,
@@ -164,24 +199,34 @@ def validate(placeholders,
     for _ in range(nthreads):
         img_queue.put(sentinel)
 
-    # Write the summaries
-    class_labels = this_set.mask_labels[:this_set.non_void_nclasses]
-    if cfg.summary_per_subset:
-        # Write the IoUs per subset (i.e., video) and (potentially) class and
-        # their average
-        write_IoUs_summaries(per_subset_IoUs, step=cidx,
-                             class_labels=class_labels)
-        write_IoUs_summaries({'mean_per_video': mIoU}, step=cidx)
+    # Write the summaries at the end of the set evalutation
+    if cfg.task == cfg.task_names['seg']:
+        class_labels = this_set.mask_labels[:this_set.non_void_nclasses]
+        if cfg.summary_per_subset:
+            # Write the IoUs per subset (i.e., video) and (potentially)
+            # class and their average
+            write_IoUs_summaries(per_subset_IoUs, step=cidx,
+                                 class_labels=class_labels)
+            write_IoUs_summaries({'mean_per_video': mIoU}, step=cidx)
+        else:
+            # Write the IoUs (potentially per class) and the average IoU
+            # over all the sequences
+            write_IoUs_summaries({'global': per_class_IoU}, step=cidx,
+                                 class_labels=class_labels)
+            write_IoUs_summaries({'global_mean': mIoU}, step=cidx)
+    elif cfg.task == cfg.task_names['reg']:
+        # TODO: not sure.. maybe PSNR/MSE
+        pass
+    elif cfg.task == cfg.task_names['class']:
+        # TODO: can be accuracy/precision/recall
+        pass
     else:
-        # Write the IoUs (potentially per class) and the average IoU over all
-        # the sequences
-        write_IoUs_summaries({'global': per_class_IoU}, step=cidx,
-                             class_labels=class_labels)
-        write_IoUs_summaries({'global_mean': mIoU}, step=cidx)
+        raise NotImplementedError()
 
     img_queue.join()  # Wait for the threads to be done
     this_set.finish()  # Close the dataset
-    return mIoU
+
+    return metric
 
 
 def write_IoUs_summaries(IoUs, step=None, class_labels=[]):

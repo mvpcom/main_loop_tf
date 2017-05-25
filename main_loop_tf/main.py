@@ -8,8 +8,7 @@ from time import time
 import dataset_loaders
 import numpy as np
 import tensorflow as tf
-from tensorflow import nn
-from tensorflow.contrib import slim
+from tensorflow import losses, nn
 from tensorflow.python.framework import ops
 from tensorflow.python.training import training
 from tensorflow.python.training.supervisor import Supervisor
@@ -33,7 +32,7 @@ except:
     import warnings
     warnings.warn('pygtk is not installed, it will not be possible to '
                   'debug the optical flow')
-    pygtk = None
+    # pygtk = None
     gtk = None
 
 FLAGS = gflags.FLAGS
@@ -48,6 +47,8 @@ gflags.DEFINE_string('model_name', 'my_model', 'The name of the model, '
                      'for the checkpoint file')
 gflags.DEFINE_string('supervisor_master', '', 'The "master" string for the '
                      'Supervisor')
+gflags.DEFINE_string('task', None,
+                     '[classification/segmentation/regression]')
 
 
 def run(argv, build_model):
@@ -78,6 +79,12 @@ def __parse_config(argv=None):
     fl = FLAGS.FlagDict()
     cfg.__dict__ = {k: el.value for (k, el) in fl.iteritems()}
     gflags.cfg = cfg
+
+    cfg.task_names = dict({'reg': 'regression',
+                           'seg': 'segmentation',
+                           'class': 'classification'})
+    assert cfg.task in cfg.task_names.values(), (
+        'Only regression/classification/segmentation are available')
 
     # ============ gsheet
     # Save params for log, excluding non JSONable and not interesting objects
@@ -136,7 +143,7 @@ def __parse_config(argv=None):
 
     # Dataset
     try:
-        Dataset = getattr(dataset_loaders, cfg.dataset)
+        Dataset = getattr(dataset_loaders, cfg.dataset + 'Dataset')
     except AttributeError:
         Dataset = getattr(dataset_loaders, cfg.dataset.capitalize() +
                           'Dataset')
@@ -204,7 +211,7 @@ def __parse_config(argv=None):
         cfg.Optimizer = getattr(training, cfg.optimizer.capitalize() +
                                 'Optimizer')
     try:
-        loss_fn = getattr(nn, cfg.loss_fn)
+        loss_fn = getattr(losses, cfg.loss_fn)
     except AttributeError:
         try:
             loss_fn = getattr(nn, cfg.loss_fn.capitalize())
@@ -329,6 +336,7 @@ def __run(build_model):
             val_outs, val_summary_ops, val_reset_cm_op = build_graph(
                 val_placeholders, cfg.val_input_shape, cfg.Optimizer,
                 cfg.weight_decay, cfg.loss_fn, build_model, False)
+
             if cfg.hyperparams_summaries is not None:
                 sum_text = []
                 for (key_header,
@@ -409,10 +417,10 @@ def __run(build_model):
                 return main_loop(**main_loop_kwags)
             else:
                 # Perform validation only
-                mean_iou = {}
+                metric = {}
                 for s in cfg.val_on_sets:
                     from validate import validate
-                    mean_iou[s] = validate(
+                    metric[s] = validate(
                         val_placeholders,
                         val_outs,
                         val_summary_ops[s],
@@ -460,20 +468,23 @@ def build_graph(placeholders, input_shape, optimizer, weight_decay, loss_fn,
                 with tf.variable_scope(cfg.model_name, reuse=reuse_variables):
 
                     net_out = build_model(dev_inputs, is_training)
-                    softmax_pred = slim.softmax(net_out)
-                    tower_soft_preds.append(softmax_pred)
-
-                    # Prediction
-                    pred = tf.argmax(softmax_pred, axis=-1)
+                    if cfg.task in (cfg.task_names['class'],
+                                    cfg.task_names['seg']):
+                        softmax_pred = tf.nn.softmax(net_out)
+                        tower_soft_preds.append(softmax_pred)
+                        # Prediction
+                        pred = tf.argmax(softmax_pred, axis=-1)
+                        # Loss
+                        # Use softmax, unless using the
+                        # tf.nn.sparse_softmax_cross_entropy function that
+                        # internally applies it already
+                        if (loss_fn is not
+                           tf.nn.sparse_softmax_cross_entropy_with_logits):
+                            net_out = softmax_pred
+                    else:
+                        pred = net_out
                     tower_preds.append(pred)
 
-                    # Loss
-                    # Use softmax, unless using the
-                    # tf.nn.sparse_softmax_cross_entropy function that
-                    # internally applies it already
-                    if (loss_fn is not
-                            tf.nn.sparse_softmax_cross_entropy_with_logits):
-                        net_out = softmax_pred
                     loss = apply_loss(dev_labels, net_out, loss_fn,
                                       weight_decay, is_training,
                                       return_mean_loss=True)
@@ -576,17 +587,28 @@ def build_graph(placeholders, input_shape, optimizer, weight_decay, loss_fn,
 
     # Convert from list of tensors to tensor, and average
     preds = tf.concat(tower_preds, axis=0)
-    softmax_preds = tf.concat(tower_soft_preds, axis=0)
 
-    # Compute the mean IoU
-    # TODO would it be better to use less precision here?
-    mask = tf.ones_like(labels)
-    if len(cfg.void_labels):
-        mask = tf.cast(tf.less_equal(labels, nclasses), tf.int32)
-    preds_flat = tf.reshape(preds, [-1])
-    m_iou, per_class_iou, cm_update_op, reset_cm_op = compute_mean_iou(
-        labels, preds_flat, nclasses, mask)
-    # Compute the average *per variable* across the towers
+    if cfg.task == cfg.task_names['seg']:
+        softmax_preds = tf.concat(tower_soft_preds, axis=0)
+        # Compute the mean IoU
+        # TODO would it be better to use less precision here?
+        mask = tf.ones_like(labels)
+        if len(cfg.void_labels):
+            mask = tf.cast(tf.less_equal(labels, nclasses), tf.int32)
+        preds_flat = tf.reshape(preds, [-1])
+        m_iou, per_class_iou, cm_update_op, reset_cm_op = compute_mean_iou(
+            labels, preds_flat, nclasses, mask)
+
+    elif cfg.task == cfg.task_names['class']:
+        softmax_preds = tf.concat(tower_soft_preds, axis=0)
+
+    elif cfg.task == cfg.task_names['reg']:
+        pass
+
+    else:
+        raise NotImplementedError()
+
+    # Compute the average loss  across the towers
     avg_tower_loss = tf.reduce_mean(tower_losses)
 
     if is_training:
@@ -640,10 +662,23 @@ def build_graph(placeholders, input_shape, optimizer, weight_decay, loss_fn,
                 val_summary_ops[k] = tf.summary.merge(s)
 
     if is_training:
-        return [avg_tower_loss, train_op], train_summary_op, reset_cm_op
+        if cfg.task == cfg.task_names['seg']:
+            return ([preds, avg_tower_loss, train_op], train_summary_op,
+                    reset_cm_op)
+        elif cfg.task == cfg.task_names['reg']:
+            return ([preds, avg_tower_loss, train_op], train_summary_op, None)
+        else:
+            raise NotImplementedError()
+
     else:
-        return ([preds, softmax_preds, m_iou, per_class_iou, avg_tower_loss,
-                 cm_update_op], val_summary_ops, reset_cm_op)
+        if cfg.task == cfg.task_names['seg']:
+            return ([preds, softmax_preds, m_iou, per_class_iou,
+                    avg_tower_loss, cm_update_op], val_summary_ops,
+                    reset_cm_op)
+        elif cfg.task == cfg.task_names['reg']:
+            return ([preds, avg_tower_loss], val_summary_ops, None)
+        else:
+            raise NotImplementedError()
 
 
 def main_loop(placeholders, val_placeholders, train_outs, train_summary_op,
@@ -681,9 +716,10 @@ def main_loop(placeholders, val_placeholders, train_outs, train_summary_op,
     tf.logging.info("Beginning main loop...")
     loss_value = 0
 
-    if pygtk and cfg.debug_of:
+    if cfg.debug_of:
         cv2.namedWindow("rgb-optflow")
 
+    cv2.namedWindow("rgb-optflow")
     while not sv.should_stop():
         epoch_id = cum_iter // train.nbatches
         pbar = tqdm(total=train.nbatches,
@@ -703,7 +739,7 @@ def main_loop(placeholders, val_placeholders, train_outs, train_summary_op,
             # sh = inputs.shape  # do NOT provide a list of shapes
             x_in = x_batch
             y_in = y_batch.flatten()
-            if pygtk and cfg.debug_of:
+            if cfg.debug_of:
                 for x_b in x_in:
                     for x_frame in x_b:
                         rgb_of_frame = np.concatenate(
@@ -737,17 +773,38 @@ def main_loop(placeholders, val_placeholders, train_outs, train_summary_op,
             # train_op does not return anything, but must be in the
             # outputs to update the gradient
             if cum_iter % cfg.train_summary_freq == 0:
-                loss_value, _, summary_str = cfg.sess.run(
+                pred_values, loss_value, _, summary_str = cfg.sess.run(
                     train_outs + [train_summary_op],
                     feed_dict=feed_dict)
                 sv.summary_computed(cfg.sess, summary_str)
             else:
-                loss_value, _ = cfg.sess.run(train_outs, feed_dict=feed_dict)
+                pred_values, loss_value, _ = cfg.sess.run(train_outs,
+                                                          feed_dict=feed_dict)
 
             pbar.set_description('({:3d}) Ep {:d}'.format(cum_iter+1,
                                                           epoch_id+1))
             pbar.set_postfix({'D': '{:.2f}s'.format(t_data_load),
                               'loss': '{:.3f}'.format(loss_value)})
+
+            # Visualize prediction
+            if (cum_iter+1) % 100 == 0:
+                pred_values = np.array(pred_values[:, np.newaxis, ...])
+                for x_b, y_b, pred_v in zip(x_batch, y_batch, pred_values):
+                    for x_frame in x_b:
+                        cv2.imshow("rgb-optflow", x_frame)
+                        cv2.waitKey(100)
+                    cv2.waitKey(500)
+                    cv2.imshow("rgb-optflow", np.concatenate(
+                        [y_b[0], pred_v[0]], axis=1))
+                    cv2.waitKey(500)
+
+            # for (y_b, p_b) in zip(y_batch, pred_values):
+            #     for (gt_frame, pred_frame) in zip(y_b, p_b):
+            #         vis_frame = np.concatenate(
+            #             [gt_frame, pred_frame], axis=1).astype(np.float32)
+            #         cv2.imshow("rgb-optflow", vis_frame)
+            #         cv2.waitKey(100)
+
             pbar.update(1)
 
         # It's the end of the epoch
@@ -768,10 +825,10 @@ def main_loop(placeholders, val_placeholders, train_outs, train_summary_op,
         # Validate if last epoch, early stop or we reached valid_every
         if last_epoch or estop or not val_skip:
             # Validate
-            mean_iou = {}
+            metric = {}
             from validate import validate
             for s in cfg.val_on_sets:
-                mean_iou[s] = validate(
+                metric[s] = validate(
                     val_placeholders,
                     val_outs,
                     val_summary_ops[s],
@@ -780,11 +837,11 @@ def main_loop(placeholders, val_placeholders, train_outs, train_summary_op,
                     epoch_id=epoch_id)
 
             # TODO gsheet
-            history_acc.append([mean_iou.get('valid')])
+            history_acc.append([metric.get('valid')])
 
-            # Did we improve *validation* mean IOU accuracy?
+            # Did we improve *validation* metric?
             best_hist = np.array(history_acc).max()
-            if len(history_acc) == 0 or mean_iou.get('valid') >= best_hist:
+            if len(history_acc) == 0 or metric.get('valid') >= best_hist:
                 tf.logging.info('## Best model found! ##')
                 t_save = time()
                 checkpoint_path = os.path.join(cfg.checkpoints_dir,
