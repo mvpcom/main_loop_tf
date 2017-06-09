@@ -151,7 +151,28 @@ def __parse_config(argv=None):
     dataset_params['batch_size'] = cfg.batch_size * cfg.num_splits
     dataset_params['data_augm_kwargs'] = {}
     dataset_params['data_augm_kwargs']['crop_size'] = cfg.crop_size
-    dataset_params['data_augm_kwargs']['return_optical_flow'] = cfg.of
+    dataset_params['data_augm_kwargs']['crop_mode'] = cfg.crop_mode
+    dataset_params['data_augm_kwargs']['smart_crop_random_h_shift_range'] = \
+        cfg.smart_crop_random_h_shift_range
+    dataset_params['data_augm_kwargs']['smart_crop_random_v_shift_range'] = \
+        cfg.smart_crop_random_v_shift_range
+    dataset_params['data_augm_kwargs']['crop_mode'] = cfg.crop_mode
+
+    assert cfg.of in (None, 'Brox', 'Farn', 'LK', 'TVL1', 'rgb')
+
+    if cfg.of in ('Brox', 'Farn', 'LK', 'TVL1'):
+        dataset_params['data_augm_kwargs']['compute_optical_flow'] = False
+        dataset_params['data_augm_kwargs']['return_optical_flow'] = True
+        dataset_params['data_augm_kwargs']['optical_flow_type'] = cfg.of
+    elif cfg.of == 'rgb':
+        dataset_params['data_augm_kwargs']['compute_optical_flow'] = True
+        dataset_params['data_augm_kwargs']['return_optical_flow'] = cfg.of
+        dataset_params['data_augm_kwargs']['optical_flow_type'] = None
+    else:
+        dataset_params['data_augm_kwargs']['compute_optical_flow'] = False
+        dataset_params['data_augm_kwargs']['return_optical_flow'] = cfg.of
+        dataset_params['data_augm_kwargs']['optical_flow_type'] = None
+
     dataset_params['return_one_hot'] = False
     dataset_params['return_01c'] = True
     if cfg.seq_per_subset:
@@ -185,6 +206,7 @@ def __parse_config(argv=None):
     dataset_params['divide_by_per_img_std'] = cfg.divide_by_per_img_std
     dataset_params['remove_mean'] = cfg.remove_mean
     dataset_params['divide_by_std'] = cfg.divide_by_std
+    data_augm_kwargs = dataset_params['data_augm_kwargs']
     cfg.dataset_params = dataset_params
     cfg.valid_params = deepcopy(cfg.dataset_params)
     cfg.valid_params.update({
@@ -197,7 +219,10 @@ def __parse_config(argv=None):
         'one_subset_per_batch': True,  # prevent multiple subsets in one batch
         'use_threads': False,  # prevent shuffling
         # prevent crop
-        'data_augm_kwargs': {'return_optical_flow': cfg.of}})
+        'data_augm_kwargs': {
+            'compute_optical_flow': data_augm_kwargs['compute_optical_flow'],
+            'return_optical_flow': data_augm_kwargs['return_optical_flow'],
+            'optical_flow_type': data_augm_kwargs['optical_flow_type']}})
     cfg.void_labels = getattr(Dataset, 'void_labels', [])
     cfg.nclasses = Dataset.non_void_nclasses
     cfg.nclasses_w_void = Dataset.nclasses

@@ -324,7 +324,7 @@ def save_images(img_queue, save_basedir, sentinel):
                     raw_data_batch):
                 # y = np.expand_dims(y, -1)
                 # y_pred = np.expand_dims(y_pred, -1)
-                if x.shape[-1] == 5:
+                if x.shape[-1] == 6:
                     # Keep only middle frame name and save as png
                     seq_length = x_batch.shape[1]
                     f = f[seq_length // 2]
@@ -335,17 +335,17 @@ def save_images(img_queue, save_basedir, sentinel):
                     f = f[:-4]
                     f = f + '.png'
                 # Retrieve the optical flow channels
-                if x.shape[-1] == 5:
+                if x.shape[-1] == 6:
                     of = x[seq_length // 2, ..., 3:]
                     # ang, mag = of
-                    import cv2
-                    hsv = np.zeros_like(x[seq_length // 2, ..., :3],
-                                        dtype='uint8')
-                    hsv[..., 0] = of[..., 0] * 255
-                    hsv[..., 1] = 255
-                    hsv[..., 2] = cv2.normalize(of[..., 1] * 255, None, 0, 255,
-                                                cv2.NORM_MINMAX)
-                    of = cv2.cvtColor(hsv, cv2.COLOR_HSV2RGB)
+                    # import cv2
+                    # hsv = np.zeros_like(x[seq_length // 2, ..., :3],
+                    #                     dtype='uint8')
+                    # hsv[..., 0] = of[..., 0] * 255
+                    # hsv[..., 1] = 255
+                    # hsv[..., 2] = cv2.normalize(of[..., 1] * 255, None, 0, 255,
+                    #                             cv2.NORM_MINMAX)
+                    # of = cv2.cvtColor(hsv, cv2.COLOR_HSV2RGB)
                 else:
                     of = None
 
@@ -431,9 +431,9 @@ def save_heatmap_fn(x, of, y_soft_pred, labels, nclasses, save_basedir, subset,
     grid[0].imshow(x)
     grid[1].set_title('Prediction')
     # optical flow: cmap is ignored for 3D
-    if of is not None:
-        grid[1].imshow(of, vmin=0, vmax=1, interpolation='nearest')
-        grid[1].set_title('Optical flow')
+    # if of is not None:
+    #    grid[1].imshow(of, vmin=0, vmax=1, interpolation='nearest')
+    #    grid[1].set_title('Optical flow')
     # heatmaps
     for l, pred, ax in zip(labels[:nclasses-1], y_soft_pred.transpose(2, 0, 1),
                            grid[num_extra_frames:]):
