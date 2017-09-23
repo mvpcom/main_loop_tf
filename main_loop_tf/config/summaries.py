@@ -3,6 +3,8 @@ from main_loop_tf import gflags_ext
 
 
 # Summaries and samples
+# gflags.DEFINE_bool('write_videos', True, 'Whether to save the video of '
+#                    'the summaries')
 gflags.DEFINE_bool('show_samples_summaries', True, 'Whether to save the '
                    'GT/Prediction image summaries')
 gflags.DEFINE_bool('show_heatmaps_summaries', False, 'Whether to save the '

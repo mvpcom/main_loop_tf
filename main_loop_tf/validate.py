@@ -67,11 +67,20 @@ def validate(placeholders,
                            '[{elapsed}<{remaining},'
                            '{rate_fmt} {postfix}]')
 
+    prev_subset = None
     if cfg.compute_mean_iou:
-        prev_subset = None
         per_subset_IoUs = {}
         # Reset Confusion Matrix at the beginning of validation
         cfg.sess.run(reset_cm_op)
+
+    video_pred = []
+    video_of = []
+    video_dir = os.path.join(cfg.checkpoints_dir, 'videos', str(epoch_id))
+    of_dir = os.path.join(cfg.checkpoints_dir, 'of', str(epoch_id))
+    if not os.path.exists(video_dir):
+            os.makedirs(video_dir)
+    if not os.path.exists(of_dir):
+            os.makedirs(of_dir)
 
     cidx = (epoch_id*this_set.nbatches)
     frame_idx = cidx
@@ -119,6 +128,30 @@ def validate(placeholders,
                             'For stateful validation, the validation '
                             'dataset should provide `subset`')
                     # reset_states(model, x_batch.shape)
+                prev_subset = subset
+        else:
+            if not prev_subset or subset != prev_subset:
+                if prev_subset is not None:
+                    # write Videos per each subset
+                    frames = np.array(video_pred)
+                    sdx = 2 if frames.ndim == 5 else 1
+                    frames = frames.reshape([-1] + list(frames.shape[sdx:]))
+                    frames = (frames * 255.0).astype('uint8')
+
+                    fname = os.path.join(video_dir, prev_subset + '.mp4')
+                    write_video(frames, fname, 15, codec='H264')
+
+                    # write OF videos
+                    of_frames = np.array(video_of)
+                    sdx = 2 if of_frames.ndim == 5 else 1
+                    of_frames = of_frames.reshape(
+                        [-1] + list(of_frames.shape[sdx:]))
+                    fname = os.path.join(of_dir, prev_subset + '.mp4')
+                    write_video(of_frames, fname, 15, codec='H264',
+                                flowRGB=True)
+
+                    video_pred = []
+                    video_of = []
                 prev_subset = subset
 
         if cfg.seq_length and y_batch.shape[1] > 1:
@@ -206,8 +239,11 @@ def validate(placeholders,
         # Save image summary for learning visualization
 
         of_pred_batch = fetch_dict.get('of_pred', [None] * len(f_batch))
-        y_pred_batch = fetch_dict['pred']
+        y_pred_batch = fetch_dict['out_argmax']
         y_prob_batch = fetch_dict['out_act']
+        video_pred.append(y_pred_batch)
+        video_of.append(of_pred_batch)
+
         img_queue.put((frame_idx, this_set, x_batch, y_batch, f_batch, subset,
                        raw_data_batch, of_pred_batch, y_pred_batch,
                        y_prob_batch))
@@ -624,6 +660,34 @@ def save_samples_and_animations(raw_data, of, of_pred, y_pred, y, cmap,
             os.makedirs(os.path.dirname(fpath))
         img.save(fpath)
         del(img)
+
+
+def write_video(frames, fname, fps, codec='H264', flowRGB=False):
+    """
+    Utility function to serialize a 4D numpy tensor to video.
+
+    Inputs:
+        frames: 4D numpy array
+        fname: output filename
+        fps: frame rate of the output video
+        codec: 4 digit string for the coded, default='H264'
+    Returns:
+        no return value
+    """
+    import cv2
+    from utils import flowToColor
+    # http://www.pyimagesearch.com/2016/02/22/writing-to-video-with-opencv/
+    fourcc = cv2.VideoWriter_fourcc(*codec)
+
+    h, w = frames.shape[1:3]
+    writer = cv2.VideoWriter(fname, fourcc, fps, (w, h), True)
+    for f in frames:
+        if flowRGB:
+            f = flowToColor(f)
+            f = (f * 255.0).astype('uint8')
+        f = cv2.cvtColor(f, cv2.COLOR_RGB2BGR)
+        writer.write(f)
+    writer.release()
 
 
 def save_animation_frame(frame, video_name, save_basedir):

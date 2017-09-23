@@ -847,15 +847,19 @@ def main_loop(placeholders, val_placeholders, train_outs, train_summary_ops,
 
             # Show optical flow for debug
             if pygtk and cfg.debug_of:
-                for x_b in x_batch:
+                for x_b, y_b in zip(x_batch, y_batch):
+                        # x_frame = x_b[-1]
+                    y_frame = x_b[cfg.seq_length // 2]
                     for x_frame in x_b:
                         rgb_of_frame = np.concatenate(
-                            [x_frame[..., :3], x_frame[..., 3:]],
+                            [x_frame, y_frame, abs(x_frame-y_frame)],
+                            # [x_frame[..., :3], x_frame[..., 3:]],
                             axis=1).astype(np.float32)
                         rgb_of_frame = cv2.cvtColor(rgb_of_frame,
                                                     cv2.COLOR_RGB2BGR)
                         cv2.imshow("rgb-optflow", rgb_of_frame)
                         cv2.waitKey(100)
+                    cv2.waitKey()
 
             # reset_states(model, sh)
 
